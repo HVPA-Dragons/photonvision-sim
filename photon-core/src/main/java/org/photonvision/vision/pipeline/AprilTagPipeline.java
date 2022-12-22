@@ -17,11 +17,26 @@
 
 package org.photonvision.vision.pipeline;
 
+import edu.wpi.first.math.VecBuilder;
+import edu.wpi.first.math.geometry.Rotation3d;
 import edu.wpi.first.math.geometry.Transform3d;
+import edu.wpi.first.math.geometry.Translation3d;
 import edu.wpi.first.math.util.Units;
+import edu.wpi.first.util.WPIUtilJNI;
+
 import java.util.ArrayList;
 import java.util.List;
+
+import org.opencv.calib3d.Calib3d;
+import org.opencv.core.Core;
+import org.opencv.core.CvType;
 import org.opencv.core.Mat;
+import org.opencv.core.MatOfPoint2f;
+import org.opencv.core.MatOfPoint3f;
+import org.opencv.core.Point;
+import org.opencv.core.Point3;
+import org.photonvision.common.logging.LogGroup;
+import org.photonvision.common.logging.Logger;
 import org.photonvision.common.util.math.MathUtils;
 import org.photonvision.raspi.PicamJNI;
 import org.photonvision.vision.apriltag.AprilTagDetectorParams;
@@ -37,6 +52,8 @@ import org.photonvision.vision.target.TrackedTarget.TargetCalculationParameters;
 
 @SuppressWarnings("DuplicatedCode")
 public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipelineSettings> {
+    private static final Logger logger = new Logger(AprilTagPipeline.class, LogGroup.Data);
+    
     private final RotateImagePipe rotateImagePipe = new RotateImagePipe();
     private final GrayscalePipe grayscalePipe = new GrayscalePipe();
     private final AprilTagDetectionPipe aprilTagDetectionPipe = new AprilTagDetectionPipe();
@@ -157,9 +174,42 @@ public class AprilTagPipeline extends CVPipeline<CVPipelineResult, AprilTagPipel
                             new TargetCalculationParameters(
                                     false, null, null, null, null, frameStaticProperties));
 
-            var correctedBestPose = MathUtils.convertOpenCVtoPhotonPose(target.getBestCameraToTarget3d());
-            var correctedAltPose = MathUtils.convertOpenCVtoPhotonPose(target.getAltCameraToTarget3d());
-
+            double timeStart = WPIUtilJNI.now();
+            var targetCorners = target.getTargetCorners().toArray(new Point[0]);
+            var ippeTargetCorners = new Point[4];
+            ippeTargetCorners[0] = targetCorners[2];
+            ippeTargetCorners[1] = targetCorners[3];
+            ippeTargetCorners[2] = targetCorners[0];
+            ippeTargetCorners[3] = targetCorners[1];
+            var imagePoints = new MatOfPoint2f(ippeTargetCorners);
+            var rvecs = new ArrayList<Mat>();
+            var tvecs = new ArrayList<Mat>();
+            Calib3d.solvePnPGeneric(
+                new MatOfPoint3f(
+                    new Point3(-0.0762, 0.0762, 0),
+                    new Point3(0.0762, 0.0762, 0),
+                    new Point3(0.0762, -0.0762, 0),
+                    new Point3(-0.0762, -0.0762, 0)
+                ), imagePoints,
+                frameStaticProperties.cameraCalibration.cameraIntrinsics.getAsMatOfDouble(),
+                frameStaticProperties.cameraCalibration.cameraExtrinsics.getAsMatOfDouble(),
+                rvecs, tvecs,
+                false, Calib3d.SOLVEPNP_IPPE_SQUARE,
+                Mat.zeros(3, 1, CvType.CV_32F), Mat.zeros(3, 1, CvType.CV_32F),
+                new Mat()
+            );
+            var bestTvec = tvecs.get(0);
+            var bestRvec = rvecs.get(0);
+            Translation3d translation =
+                new Translation3d(bestTvec.get(0, 0)[0], bestTvec.get(1, 0)[0], bestTvec.get(2, 0)[0]);
+            Rotation3d rotation =
+                new Rotation3d(
+                        VecBuilder.fill(bestRvec.get(0, 0)[0], bestRvec.get(1, 0)[0], bestRvec.get(2, 0)[0]),
+                        Core.norm(bestRvec));
+            var correctedBestPose = MathUtils.convertOpenCVtoPhotonPose(new Transform3d(translation, rotation));
+            var correctedAltPose = MathUtils.convertOpenCVtoPhotonPose(new Transform3d());
+            logger.debug("IPPE_SQUARE: "+(WPIUtilJNI.now() - timeStart)*1e-6);
+            
             target.setBestCameraToTarget3d(
                     new Transform3d(correctedBestPose.getTranslation(), correctedBestPose.getRotation()));
             target.setAltCameraToTarget3d(
